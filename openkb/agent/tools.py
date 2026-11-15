@@ -78,8 +78,9 @@ _SEARCH_TOTAL_DETAILED = 60
 _SEARCH_MIN_DETAILED_PER_TERM = 5
 _SNIPPET_RADIUS = 90
 _SEARCH_FOOTER = (
-    "Keyword matches only (case- and accent-insensitive). Pages that describe the same "
-    "thing in other words will not appear: this complements index.md, it does not replace it."
+    "These are pointers, not answers: read the relevant pages before answering. Keyword "
+    "matches only (case- and accent-insensitive): pages that describe the same thing in "
+    "other words will not appear, so this complements index.md, it does not replace it."
 )
 
 # path -> (mtime_ns, size, folded body); refreshed when a file changes on disk.

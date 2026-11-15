@@ -180,3 +180,27 @@ def test_many_terms_share_the_result_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(tools, "_SEARCH_MIN_PER_TERM", 1)
     out = search_wiki_pages(["family office", "x", "y", "z"], _wiki(tmp_path))
     assert '"family office": 3 page(s), showing 1' in out
+
+
+def _tool(agent, name):
+    return next(t for t in agent.tools if t.name == name)
+
+
+def test_search_locked_until_index_read(tmp_path):
+    import asyncio
+
+    from openkb.agent.query import SEARCH_LOCKED_MESSAGE, build_query_agent
+
+    root = _wiki(tmp_path)
+    agent = build_query_agent(root, "gpt-4o-mini")
+
+    def invoke(name, args):
+        from agents.tool_context import ToolContext
+
+        raw = json.dumps(args)
+        ctx = ToolContext(context=None, tool_name=name, tool_call_id="c1", tool_arguments=raw)
+        return asyncio.run(_tool(agent, name).on_invoke_tool(ctx, raw))
+
+    assert invoke("search_wiki", {"terms": ["hermes"], "page_types": None}) == SEARCH_LOCKED_MESSAGE
+    invoke("read_file", {"path": "index.md"})
+    assert "summaries/afir.md" in invoke("search_wiki", {"terms": ["hermes"], "page_types": None})

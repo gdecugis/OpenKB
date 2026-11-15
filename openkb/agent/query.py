@@ -20,6 +20,11 @@ from openkb.schema import get_agents_md
 
 MAX_TURNS = 50
 
+SEARCH_LOCKED_MESSAGE = (
+    "search_wiki is available once you have read index.md (step 1): read it first, "
+    "note the page paths you need, then use search_wiki to complete them."
+)
+
 _QUERY_INSTRUCTIONS_TEMPLATE = """\
 You are OpenKB, a knowledge-base Q&A agent. You answer questions by searching the wiki.
 
@@ -82,12 +87,19 @@ def build_query_agent(
     instructions = _QUERY_INSTRUCTIONS_TEMPLATE.format(schema_md=schema_md)
     instructions += f"\n\nIMPORTANT: Answer in {language} language."
 
+    # search_wiki only complements the index: it stays locked until this run
+    # has read index.md, so the agent can't skip the index (evals showed it
+    # would, and lose recall). Agents are built per request, so this is per run.
+    run_state = {"index_read": False}
+
     @function_tool
     def read_file(path: str) -> str:
         """Read a Markdown file from the wiki.
         Args:
             path: File path relative to wiki root (e.g. 'summaries/paper.md').
         """
+        if path.strip().lstrip("./") == "index.md":
+            run_state["index_read"] = True
         return read_wiki_file(path, wiki_root)
 
     @function_tool
@@ -136,6 +148,8 @@ def build_query_agent(
                 "entities", "summaries", "concepts", "explorations", "sources".
                 Leave empty when searching names; use it to narrow broad terms.
         """
+        if not run_state["index_read"]:
+            return SEARCH_LOCKED_MESSAGE
         return search_wiki_pages(terms, wiki_root, page_types=page_types)
 
     from agents.model_settings import ModelSettings
