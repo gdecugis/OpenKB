@@ -57,6 +57,174 @@ def read_wiki_file(path: str, wiki_root: str) -> str:
     return full_path.read_text(encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------
+# Keyword search across the wiki
+# ---------------------------------------------------------------------------
+
+# Searched in this order; earlier directories rank first in results.
+_SEARCH_DIRS = ("entities", "summaries", "concepts", "explorations", "sources")
+# The first _SEARCH_DETAILED hits get a snippet; the rest, up to
+# _SEARCH_MAX_RESULTS, are listed compactly (path + one-liner) so broad terms
+# like "family office" still surface their long tail.
+_SEARCH_DETAILED = 30
+_SEARCH_MAX_RESULTS = 200
+_SNIPPET_RADIUS = 90
+_SEARCH_FOOTER = (
+    "Keyword matches only (case- and accent-insensitive). Pages that describe the same "
+    "thing in other words will not appear: this complements index.md, it does not replace it."
+)
+
+# path -> (mtime_ns, size, folded body); refreshed when a file changes on disk.
+_fold_cache: dict[str, tuple[int, int, str]] = {}
+
+
+def _fold_char(c: str) -> str:
+    import unicodedata
+
+    decomposed = unicodedata.normalize("NFKD", c)
+    folded = "".join(ch for ch in decomposed if not unicodedata.combining(ch)).lower()
+    return folded.replace("’", "'").replace("-", " ").replace("_", " ")
+
+
+def _fold(text: str) -> str:
+    """Lowercase, strip accents, and treat - and _ as spaces ("Al-Mirqab" -> "al mirqab")."""
+    import unicodedata
+
+    decomposed = unicodedata.normalize("NFKD", text)
+    folded = "".join(ch for ch in decomposed if not unicodedata.combining(ch)).lower()
+    return folded.replace("’", "'").replace("-", " ").replace("_", " ")
+
+
+def _strip_frontmatter(text: str) -> str:
+    # Frontmatter lists related page paths; matching those would flood results
+    # with every page that merely links to a match.
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            return text[end + 4 :]
+    return text
+
+
+def _folded_body(path: Path) -> str:
+    stat = path.stat()
+    key = str(path)
+    cached = _fold_cache.get(key)
+    if cached is None or cached[0] != stat.st_mtime_ns or cached[1] != stat.st_size:
+        raw = _strip_frontmatter(path.read_text(encoding="utf-8", errors="ignore"))
+        cached = (stat.st_mtime_ns, stat.st_size, _fold(raw))
+        _fold_cache[key] = cached
+    return cached[2]
+
+
+def _snippet(path: Path, pattern) -> str:
+    """Original-text snippet around the first match (accents preserved)."""
+    raw = _strip_frontmatter(path.read_text(encoding="utf-8", errors="ignore"))
+    folded_chars: list[str] = []
+    offsets: list[int] = []
+    for i, c in enumerate(raw):
+        for ch in _fold_char(c):
+            folded_chars.append(ch)
+            offsets.append(i)
+    match = pattern.search("".join(folded_chars))
+    if not match:
+        return ""
+    start = offsets[match.start()]
+    end = offsets[min(match.end(), len(offsets)) - 1] + 1
+    text = raw[max(0, start - _SNIPPET_RADIUS) : end + _SNIPPET_RADIUS]
+    return " ".join(text.split())
+
+
+def _index_descriptions(root: Path) -> dict[str, str]:
+    """Map page key ('entities/foo') -> its index.md one-liner."""
+    import re
+
+    index = root / "index.md"
+    if not index.exists():
+        return {}
+    descriptions: dict[str, str] = {}
+    for line in index.read_text(encoding="utf-8", errors="ignore").splitlines():
+        m = re.match(r"\s*-\s*\[\[([^\]|#]+)\]\](.*)", line)
+        if m:
+            descriptions[m.group(1).strip()] = m.group(2).strip().lstrip("—- ").strip()
+    return descriptions
+
+
+def search_wiki_pages(
+    terms: list[str],
+    wiki_root: str,
+    page_types: list[str] | None = None,
+    max_results: int = _SEARCH_MAX_RESULTS,
+) -> str:
+    """Keyword-search the wiki's pages for each term.
+
+    Matches whole words (plus a plural 's'/'es'), ignoring case, accents and
+    hyphens, in the body of every page under the searched directories
+    (frontmatter excluded). Returns pointers, not pages: for each match, the
+    page path, its index.md one-liner when it has one, and a short snippet of
+    the matching text.
+
+    Args:
+        terms: Words or phrases to search for, each searched separately.
+        wiki_root: Absolute path to the wiki root directory.
+        page_types: Optional subset of directories to search, e.g.
+            ``["entities"]``. Defaults to all of ``_SEARCH_DIRS``.
+        max_results: Cap on pages listed per term (the first
+            ``_SEARCH_DETAILED`` with a snippet, the rest compactly).
+    """
+    import re
+
+    root = Path(wiki_root).resolve()
+    dirs = [d for d in (page_types or _SEARCH_DIRS) if d in _SEARCH_DIRS] or list(_SEARCH_DIRS)
+    pages = [p for d in dirs if (root / d).is_dir() for p in sorted((root / d).rglob("*.md"))]
+    descriptions = _index_descriptions(root)
+
+    sections: list[str] = []
+    for term in terms:
+        folded_term = _fold(term).strip()
+        if not folded_term:
+            continue
+        pattern = re.compile(r"\b" + re.escape(folded_term) + r"(?:s|es)?\b")
+        hits: list[tuple[int, int, Path, str]] = []
+        for path in pages:
+            body = _folded_body(path)
+            if not pattern.search(body):
+                continue
+            rel = path.relative_to(root).as_posix()
+            key = rel[:-3] if rel.endswith(".md") else rel
+            description = descriptions.get(key, "")
+            # Pages whose one-liner itself names the term rank first.
+            in_description = 0 if pattern.search(_fold(description)) else 1
+            hits.append((in_description, dirs.index(rel.split("/", 1)[0]), path, description))
+        hits.sort(key=lambda h: (h[0], h[1], h[2].as_posix()))
+
+        if not hits:
+            sections.append(f'## "{term}": no match')
+            continue
+        shown = hits[:max_results]
+        header = f'## "{term}": {len(hits)} page(s)'
+        if len(hits) > len(shown):
+            header += (
+                f", showing {len(shown)}; narrow the term or pass page_types "
+                f'(e.g. ["entities"]) to see the rest'
+            )
+        lines = [header]
+        for rank, (in_description, _, path, description) in enumerate(shown):
+            rel = path.relative_to(root).as_posix()
+            line = f"- {rel}"
+            if description:
+                line += f" — {description}"
+            if in_description and rank < _SEARCH_DETAILED:
+                snippet = _snippet(path, pattern)
+                if snippet:
+                    line += f"\n  …{snippet}…"
+            lines.append(line)
+        sections.append("\n".join(lines))
+
+    if not sections:
+        return "No search terms given."
+    return "\n\n".join(sections) + "\n\n" + _SEARCH_FOOTER
+
+
 def parse_pages(pages: str) -> list[int]:
     """Parse a page specification string into a sorted, deduplicated list of page numbers.
 

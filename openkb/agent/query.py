@@ -12,6 +12,7 @@ from openkb.agent.tools import (
     get_wiki_page_content,
     read_wiki_file,
     read_wiki_image,
+    search_wiki_pages,
     write_kb_file,
 )
 from openkb.config import LlmCredentialBundle, resolve_model_settings
@@ -25,26 +26,41 @@ You are OpenKB, a knowledge-base Q&A agent. You answer questions by searching th
 {schema_md}
 
 ## Search strategy
-1. Read index.md to see all documents and concepts with brief summaries.
+1. Read index.md to see all documents, concepts and entities with brief summaries.
    Each document is marked (short) or (pageindex) to indicate its type.
-2. Read relevant summary pages (summaries/) for document overviews.
+   index.md is large and is removed from the conversation after your next step,
+   so right after reading it, write down every page path you will need for the
+   whole question (every name asked about, every candidate for a list) before
+   calling more tools.
+2. Use search_wiki to complete what the index gives you. It finds words inside
+   every page, including passing mentions the index does not list:
+   - For "which / all / list" questions, search the key term and its obvious
+     variants (e.g. "family office", "family investment", "holding") and add the
+     matching pages you had not noted. Use page_types (e.g. ["entities"]) to
+     focus on a kind of page.
+   - For names with no page in the index, search them: they may be mentioned
+     inside other pages.
+   - Put all the terms of a question in one search_wiki call.
+   Search is keyword-only: it complements the index, it never replaces it.
+   Before concluding something is not in the wiki, check both.
+3. Read relevant summary pages (summaries/) for document overviews.
    Summaries may omit details — if you need more, follow the summary's
-   `full_text` frontmatter field to the source (see step 4).
-3. Read concept pages (concepts/) for cross-document synthesis.
-4. For "who/what is X" questions about a specific named person, organization,
+   `full_text` frontmatter field to the source (see step 5).
+4. Read concept pages (concepts/) for cross-document synthesis.
+5. For "who/what is X" questions about a specific named person, organization,
    place, or product, read the matching page in entities/ first.
-5. When you need detailed source document content, each summary page has a
+6. When you need detailed source document content, each summary page has a
    `full_text` frontmatter field with the path to the original document content:
    - Short documents (doc_type: short): read_file with that path.
    - PageIndex documents (doc_type: pageindex): use get_page_content(doc_name, pages)
      with tight page ranges. The summary shows document tree structure with page
      ranges to help you target. Never fetch the whole document.
-6. Source content may reference images. Short-doc .md pages link them
+7. Source content may reference images. Short-doc .md pages link them
    note-relative (e.g. ![image](images/doc/file.png), resolved from
    wiki/sources/); long-doc JSON page metadata lists them wiki-root-relative
    (e.g. sources/images/doc/file.png). Pass either form as seen to the
    get_image tool — it accepts both.
-7. Synthesize a clear, concise, well-cited answer grounded in wiki content.
+8. Synthesize a clear, concise, well-cited answer grounded in wiki content.
 
 Answer based only on wiki content. Be concise.
 Before each tool call, output one short sentence explaining the reason.
@@ -101,6 +117,24 @@ def build_query_agent(
             return ToolOutputImage(image_url=result["image_url"])
         return ToolOutputText(text=result["text"])
 
+    @function_tool
+    def search_wiki(terms: list[str], page_types: list[str] | None = None) -> str:
+        """Keyword-search inside every wiki page (case- and accent-insensitive).
+
+        Returns, per term, the matching page paths with their index one-liner
+        and a snippet of the matching text - pointers to read, not pages.
+        Finds passing mentions that index.md does not list. Keyword-only: pages
+        describing the same thing in other words will not match.
+
+        Args:
+            terms: Names or phrases to search for, each searched separately
+                (e.g. ["Hermès", "family office"]). Put all of a question's
+                terms in one call.
+            page_types: Optional subset of page directories to search:
+                "entities", "summaries", "concepts", "explorations", "sources".
+        """
+        return search_wiki_pages(terms, wiki_root, page_types=page_types)
+
     from agents.model_settings import ModelSettings
 
     if bundle is not None:
@@ -117,7 +151,7 @@ def build_query_agent(
     return Agent(
         name="wiki-query",
         instructions=instructions,
-        tools=[read_file, get_page_content, get_image],
+        tools=[read_file, get_page_content, search_wiki, get_image],
         model=f"litellm/{model}",
         model_settings=ModelSettings(**model_settings),
     )
@@ -511,9 +545,11 @@ def build_run_config_from_bundle(model: str, bundle: "LlmCredentialBundle | None
     from agents import RunConfig
     from agents.extensions.models.litellm_model import LitellmModel
 
+    from openkb.agent.context_trim import index_trim_filter
+
     litellm_model = LitellmModel(
         model=model,
         base_url=bundle.base_url,
         api_key=bundle.api_key,
     )
-    return RunConfig(model=litellm_model)
+    return RunConfig(model=litellm_model, call_model_input_filter=index_trim_filter)
