@@ -35,11 +35,11 @@ You are OpenKB, a knowledge-base Q&A agent. You answer questions by searching th
 2. Use search_wiki to complete what the index gives you. It finds words inside
    every page, including passing mentions the index does not list:
    - For "which / all / list" questions, search the key term and its obvious
-     variants (e.g. "family office", "family investment", "holding") and add the
-     matching pages you had not noted. Use page_types (e.g. ["entities"]) to
-     focus on a kind of page.
-   - For names with no page in the index, search them: they may be mentioned
-     inside other pages.
+     variants (e.g. "family office", "family investment", "holding") with
+     page_types=["entities"] to get every candidate, and add the matching
+     pages you had not noted.
+   - For names, search them across all pages (leave page_types empty): passing
+     mentions often sit in summaries and sources, not in entity pages.
    - Put all the terms of a question in one search_wiki call.
    Search is keyword-only: it complements the index, it never replaces it.
    Before concluding something is not in the wiki, check both.
@@ -62,7 +62,9 @@ You are OpenKB, a knowledge-base Q&A agent. You answer questions by searching th
    get_image tool — it accepts both.
 8. Synthesize a clear, concise, well-cited answer grounded in wiki content.
 
-Answer based only on wiki content. Be concise.
+Answer based only on wiki content. Be concise, except in lists: for "which / all /
+list" questions, include every relevant item you found, each described briefly -
+concision applies to the descriptions, never to the number of items.
 Before each tool call, output one short sentence explaining the reason.
 
 If you cannot find relevant information, say so clearly.
@@ -132,6 +134,7 @@ def build_query_agent(
                 terms in one call.
             page_types: Optional subset of page directories to search:
                 "entities", "summaries", "concepts", "explorations", "sources".
+                Leave empty when searching names; use it to narrow broad terms.
         """
         return search_wiki_pages(terms, wiki_root, page_types=page_types)
 

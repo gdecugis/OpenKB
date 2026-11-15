@@ -166,3 +166,17 @@ def test_run_config_installs_index_filter():
     bundle = LlmCredentialBundle(api_key="k", base_url=None)
     run_config = build_run_config_from_bundle("openai/gpt-4o-mini", bundle)
     assert run_config.call_model_input_filter is index_trim_filter
+
+
+def test_entities_rank_before_other_pages(tmp_path):
+    out = search_wiki_pages(["family office"], _wiki(tmp_path))
+    assert out.index("entities/creadev.md") < out.index("summaries/afir.md")
+
+
+def test_many_terms_share_the_result_budget(tmp_path, monkeypatch):
+    import openkb.agent.tools as tools
+
+    monkeypatch.setattr(tools, "_SEARCH_TOTAL_RESULTS", 4)
+    monkeypatch.setattr(tools, "_SEARCH_MIN_PER_TERM", 1)
+    out = search_wiki_pages(["family office", "x", "y", "z"], _wiki(tmp_path))
+    assert '"family office": 3 page(s), showing 1' in out

@@ -68,6 +68,14 @@ _SEARCH_DIRS = ("entities", "summaries", "concepts", "explorations", "sources")
 # like "family office" still surface their long tail.
 _SEARCH_DETAILED = 30
 _SEARCH_MAX_RESULTS = 200
+# Total pages listed across all terms of one call: many broad terms in one call
+# share it (each still gets at least _SEARCH_MIN_PER_TERM). The result stays in
+# the agent's context for the rest of the run, so it must stay small.
+_SEARCH_TOTAL_RESULTS = 400
+_SEARCH_MIN_PER_TERM = 30
+# Same sharing for snippets, the bulk of the output.
+_SEARCH_TOTAL_DETAILED = 60
+_SEARCH_MIN_DETAILED_PER_TERM = 5
 _SNIPPET_RADIUS = 90
 _SEARCH_FOOTER = (
     "Keyword matches only (case- and accent-insensitive). Pages that describe the same "
@@ -169,7 +177,8 @@ def search_wiki_pages(
         page_types: Optional subset of directories to search, e.g.
             ``["entities"]``. Defaults to all of ``_SEARCH_DIRS``.
         max_results: Cap on pages listed per term (the first
-            ``_SEARCH_DETAILED`` with a snippet, the rest compactly).
+            ``_SEARCH_DETAILED`` with a snippet, the rest compactly); lowered
+            when many terms share ``_SEARCH_TOTAL_RESULTS``.
     """
     import re
 
@@ -177,6 +186,11 @@ def search_wiki_pages(
     dirs = [d for d in (page_types or _SEARCH_DIRS) if d in _SEARCH_DIRS] or list(_SEARCH_DIRS)
     pages = [p for d in dirs if (root / d).is_dir() for p in sorted((root / d).rglob("*.md"))]
     descriptions = _index_descriptions(root)
+    n_terms = max(1, sum(1 for term in terms if _fold(term).strip()))
+    per_term = min(max_results, max(_SEARCH_MIN_PER_TERM, _SEARCH_TOTAL_RESULTS // n_terms))
+    detailed = min(
+        _SEARCH_DETAILED, max(_SEARCH_MIN_DETAILED_PER_TERM, _SEARCH_TOTAL_DETAILED // n_terms)
+    )
 
     sections: list[str] = []
     for term in terms:
@@ -192,15 +206,16 @@ def search_wiki_pages(
             rel = path.relative_to(root).as_posix()
             key = rel[:-3] if rel.endswith(".md") else rel
             description = descriptions.get(key, "")
-            # Pages whose one-liner itself names the term rank first.
+            # Entities first (the "who" of list questions), then pages whose
+            # one-liner itself names the term.
             in_description = 0 if pattern.search(_fold(description)) else 1
-            hits.append((in_description, dirs.index(rel.split("/", 1)[0]), path, description))
+            hits.append((dirs.index(rel.split("/", 1)[0]), in_description, path, description))
         hits.sort(key=lambda h: (h[0], h[1], h[2].as_posix()))
 
         if not hits:
             sections.append(f'## "{term}": no match')
             continue
-        shown = hits[:max_results]
+        shown = hits[:per_term]
         header = f'## "{term}": {len(hits)} page(s)'
         if len(hits) > len(shown):
             header += (
@@ -208,12 +223,12 @@ def search_wiki_pages(
                 f'(e.g. ["entities"]) to see the rest'
             )
         lines = [header]
-        for rank, (in_description, _, path, description) in enumerate(shown):
+        for rank, (_, in_description, path, description) in enumerate(shown):
             rel = path.relative_to(root).as_posix()
             line = f"- {rel}"
             if description:
                 line += f" — {description}"
-            if in_description and rank < _SEARCH_DETAILED:
+            if in_description and rank < detailed:
                 snippet = _snippet(path, pattern)
                 if snippet:
                     line += f"\n  …{snippet}…"
